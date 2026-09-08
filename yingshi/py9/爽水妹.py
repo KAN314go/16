@@ -5,7 +5,8 @@ from urllib import request, parse
 from urllib.parse import urljoin
 
 
-class Spider:
+from base.spider import Spider
+class Spider(Spider):
     def __init__(self):
         self.siteUrl = "https://zcl.ssm4.xyz"
         self.headers = {
