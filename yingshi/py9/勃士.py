@@ -12,7 +12,8 @@ import urllib.request
 import urllib.parse
 
 
-class Spider:
+from base.spider import Spider
+class Spider(Spider):
     """勃士 四壳通用Python Spider（独立类，不继承base.spider）"""
 
     # ============================================================
