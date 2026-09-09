@@ -8,7 +8,8 @@ import urllib.parse
 from lxml import html
 
 
-class Spider(BaseSpider):
+from base.spider import Spider
+class Spider(Spider):
     def __init__(self):
         super().__init__()
         self.siteUrl = "https://kie.gdd4.pics"
