@@ -14,6 +14,10 @@ except ImportError:
             pass
 
 
+# 图片可能挂在各种自定义属性上，按优先级依次尝试
+IMG_ATTRS = ("data-echo", "data-original", "data-src", "data-lazy-src", "data-background", "src")
+
+
 class Spider(_BaseSpider):
     name = "屌丝天下"
     host = "https://xav.dstx7.xyz"
@@ -72,7 +76,11 @@ class Spider(_BaseSpider):
         if isinstance(tid, dict):
             tid = tid.get("tid", "20")
             pg = int(tid.get("pg", 1))
-        url = f"{self.host}{self.path}/vod/show/id/{tid}.html"
+        # 第 1 页: /vod/type/id/21.html；第 N 页: /vod/type/id/21/page/N.html
+        if pg > 1:
+            url = f"{self.host}{self.path}/vod/type/id/{tid}/page/{pg}.html"
+        else:
+            url = f"{self.host}{self.path}/vod/type/id/{tid}.html"
         try:
             html = self._fetch(url)
             vod_list = self._parse_list(html)
@@ -89,7 +97,7 @@ class Spider(_BaseSpider):
         result_list = []
         for vid in ids:
             try:
-                url = f"{self.host}{self.path}/vod/show/id/{vid}.html"
+                url = f"{self.host}{self.path}/vod/play/id/{vid}/sid/1/nid/1.html"
                 html = self._fetch(url)
                 vod = self._parse_detail(html, str(vid))
                 if vod:
@@ -116,7 +124,6 @@ class Spider(_BaseSpider):
         flag = args[0] if args else "ckplayer"
         id_str = args[1] if len(args) > 1 else ""
 
-        # 【核心修复】如果传入的已经是完整播放页URL，直接使用，不再重拼
         if isinstance(id_str, str) and id_str.startswith("http"):
             url = id_str
         elif isinstance(id_str, str) and id_str.startswith("/"):
@@ -131,7 +138,7 @@ class Spider(_BaseSpider):
                     elif p == "sid" and i + 1 < len(parts):
                         sid = parts[i + 1]
                     elif p == "nid" and i + 1 < len(parts):
-                        nid = parts[i + 1].split(".")[0]  # 去掉 .html 后缀
+                        nid = parts[i + 1].split(".")[0]
             if not vid:
                 vid = str(id_str)
             url = f"{self.host}{self.path}/vod/play/id/{vid}/sid/{sid}/nid/{nid}.html"
@@ -164,7 +171,6 @@ class Spider(_BaseSpider):
                 url = param.get("url", "")
             else:
                 url = str(param)
-            # 【关键】把 local:// 还原为 https://
             if url.startswith("local://"):
                 url = url.replace("local://", "https://", 1)
             if not url.startswith("http"):
@@ -172,8 +178,6 @@ class Spider(_BaseSpider):
             req = urllib.request.Request(url, headers={
                 "User-Agent": self.ua,
                 "Referer": self.host + "/",
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9",
             })
             resp = urllib.request.urlopen(req, timeout=15, context=self._ssl_ctx)
             data = resp.read()
@@ -212,56 +216,61 @@ class Spider(_BaseSpider):
                 continue
         return raw.decode("utf-8", errors="replace")
 
-    def _wrap_pic(self, pic):
-        """【新增】把图片地址包成 local://，让 TVBox 走 localProxy 请求（自动带 Referer）"""
-        if not pic:
-            return ""
-        if not pic.startswith("http"):
-            pic = urllib.parse.urljoin(self.host, pic)
-        if pic.startswith("https://"):
-            return "local://" + pic[8:]
-        elif pic.startswith("http://"):
-            return "local://" + pic[7:]
-        return pic
+    # ---------- 图片提取（关键修复） ----------
+    def _extract_img(self, html_fragment):
+        """从一段 HTML 片段里按优先级找图片 URL"""
+        for attr in IMG_ATTRS:
+            m = re.search(rf'{attr}=["\']([^"\']+)["\']', html_fragment)
+            if m:
+                candidate = m.group(1).strip()
+                if not candidate or candidate.startswith("data:"):
+                    continue
+                if not candidate.startswith("http"):
+                    candidate = urllib.parse.urljoin(self.host, candidate)
+                return candidate
+        return ""
 
+    # ---------- 列表解析 ----------
     def _parse_list(self, html):
         vod_list = []
         seen = set()
-        def _add(vid, title, pic):
+
+        # 完整匹配 <a ...>...</a>，抓到每一块内部，再从内部提取图片
+        a_pattern = re.compile(
+            r'<a[^>]*href=["\'][^"\']*vod/play/id/(\d+)[^"\']*["\'][^>]*title=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
+            re.S
+        )
+
+        for m in a_pattern.finditer(html):
+            vid = m.group(1)
+            title = m.group(2).strip()
+            inner = m.group(3)
+
             if vid in seen or not title:
-                return
+                continue
             seen.add(vid)
+
+            pic = self._extract_img(inner)
+
             vod_list.append({
                 "vod_id": vid,
                 "vod_name": title,
-                "vod_pic": self._wrap_pic(pic),
-                "vod_remarks": "", "vod_year": "", "vod_area": "",
-                "vod_actor": "", "vod_director": "", "vod_content": "",
+                "vod_pic": pic,
+                "vod_remarks": "",
+                "vod_year": "",
+                "vod_area": "",
+                "vod_actor": "",
+                "vod_director": "",
+                "vod_content": "",
             })
-        p1 = re.compile(
-            r'<a[^>]*href="[^"]*vod/play/id/(\d+)[^"]*"[^>]*title="([^"]*)"[^>]*>\s*'
-            r'<img[^>]*data-original="([^"]*)"',
-            re.S
-        )
-        for m in p1.finditer(html):
-            _add(m.group(1), m.group(2).strip(), m.group(3))
-        p2 = re.compile(
-            r'<a[^>]*href="[^"]*vod/play/id/(\d+)[^"]*"[^>]*>\s*'
-            r'<img[^>]*src="([^"]*)"[^>]*title="([^"]*)"',
-            re.S
-        )
-        for m in p2.finditer(html):
-            _add(m.group(1), m.group(3).strip(), m.group(2))
-        p3 = re.compile(
-            r'<a[^>]*href="[^"]*vod/play/id/(\d+)[^"]*"[^>]*title="([^"]*)"',
-            re.S
-        )
-        for m in p3.finditer(html):
-            if m.group(1) not in seen:
-                _add(m.group(1), m.group(2).strip(), "")
+
         return vod_list[:40]
 
     def _parse_total(self, html):
+        # 页面里 <script>$('.mac_total').html('23461');</script>
+        m = re.search(r"mac_total['\"]?\)\.html\(['\"](\d+)", html)
+        if m:
+            return int(m.group(1))
         m = re.search(r'共(\d+)条', html)
         if m:
             return int(m.group(1))
@@ -276,18 +285,15 @@ class Spider(_BaseSpider):
         if t:
             title = re.sub(r"<[^>]+>", "", t.group(1)).strip()
             title = re.sub(r"\s*-\s*屌丝天下\s*$", "", title)
-        pic = ""
-        pm = re.search(r'<img[^>]*data-original="([^"]*)"', html)
-        if not pm:
-            pm = re.search(r'<img[^>]*src="([^"]*upload/vod/[^"]*)"', html)
-        if pm:
-            pic = pm.group(1)
-        # 【新增】详情页大图也走 localProxy
-        pic = self._wrap_pic(pic)
+
+        # 详情页图片也用同一个提取器
+        pic = self._extract_img(html)
+
         content = ""
         cm = re.search(r'class="[^"]*(?:desc|content|intro)[^"]*"[^>]*>(.*?)</div>', html, re.S)
         if cm:
             content = re.sub(r"<[^>]+>", "", cm.group(1)).strip()
+
         play_from = "ckplayer"
         play_urls = []
         play_items = re.findall(r'vod/play/id/(\d+)/sid/(\d+)/nid/(\d+)', html)
@@ -298,6 +304,7 @@ class Spider(_BaseSpider):
                 play_urls.append(f"第{nid}集${self.host}{self.path}/vod/play/id/{vid}/sid/{sid}/nid/{nid}.html")
         if not play_urls:
             play_urls.append(f"正片${self.host}{self.path}/vod/play/id/{vid}/sid/1/nid/1.html")
+
         return {
             "vod_id": vid,
             "vod_name": title,
@@ -313,7 +320,6 @@ class Spider(_BaseSpider):
         }
 
     def _extract_play_url(self, html):
-        # 1. 解析 MacCMS 播放器数据（支持嵌套 JSON）
         for key in ["player_aaaa", "player_data", "mac_player_data"]:
             m = re.search(rf'(?:var\s+)?{key}\s*=\s*(\{{[\s\S]*?\}})\s*[;<]', html)
             if not m:
@@ -339,17 +345,14 @@ class Spider(_BaseSpider):
             if not url:
                 continue
 
-            # 处理 JSON 转义
             url = url.replace("\\/", "/").replace("\\u0026", "&")
 
-            # encrypt=1 时 URL 是 base64
             if encrypt == 1:
                 try:
                     url = base64.b64decode(url).decode("utf-8", errors="replace")
                 except Exception:
                     pass
 
-            # 相对路径补全
             if url.startswith("//"):
                 url = "https:" + url
             elif url.startswith("/"):
@@ -366,7 +369,6 @@ class Spider(_BaseSpider):
 
             return url
 
-        # 2. 回退：直接抓 m3u8 / mp4
         m = re.search(r'(https?:(?:\\/|/){2}[^\s"\'<>\\]+\.(?:m3u8|mp4)[^\s"\'<>\\]*)', html)
         if m:
             url = m.group(1).replace("\\/", "/")
@@ -374,7 +376,6 @@ class Spider(_BaseSpider):
                 url = "https:" + url
             return url
 
-        # 3. 最后回退：base64 形态的 m3u8
         m = re.search(r'"url"\s*:\s*"([^"]+)"', html)
         if m:
             cand = m.group(1)
