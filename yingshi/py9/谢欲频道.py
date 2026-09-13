@@ -19,6 +19,7 @@ except Exception:
         def init(self, extend):
             self.extend = extend or {}
 
+from base.spider import Spider
 class Spider(Spider):
     def __init__(self):
         super().__init__()
